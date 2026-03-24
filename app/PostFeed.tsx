@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import { MoreHorizontal, ThumbsUp, MessageSquare, UserPlus, Check, X } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { MoreHorizontal, ThumbsUp, MessageSquare, UserPlus, Check, X, Send } from 'lucide-react';
 import webSocketService from './websocketService';
 
 export interface Post {
@@ -71,23 +71,31 @@ const buildCommentTree = (comments: CommentData[]) => {
     return roots;
 };
 
-// Component đệ quy hiển thị từng bình luận và các bình luận con
-function CommentNode({ comment, isReply = false }: { comment: CommentData, isReply?: boolean }) {
+function CommentNode({ comment, isReply = false, onReply, onDelete, currentUser }: { comment: CommentData, isReply?: boolean, onReply: (c: CommentData) => void, onDelete: (c: CommentData) => void, currentUser: any }) {
+    const isMe = currentUser && String(currentUser.id) === String(comment.user.user_id);
+
     return (
-        <div className="flex gap-2.5 items-start mt-3 first:mt-0 w-full">
+        <div className="flex gap-2.5 items-start mt-3 first:mt-0 w-full group">
             <img src={getImageUrl(comment.user.avatar_url)} className={`${isReply ? 'w-6 h-6' : 'w-8 h-8'} rounded-full object-cover shrink-0 ring-1 ring-gray-200`} alt="avatar" />
             <div className="flex flex-col flex-1 min-w-0">
-                <div className="bg-white border border-gray-100 px-3 py-2 rounded-2xl rounded-tl-sm shadow-sm inline-flex flex-col self-start max-w-full">
-                    <span className="font-bold text-[13px] text-gray-900 leading-tight">{comment.user.username}</span>
-                    <span className="text-[14px] text-gray-800 break-words mt-0.5">{comment.content}</span>
+                <div className="flex items-center gap-2">
+                    <div className="bg-white border border-gray-100 px-3 py-2 rounded-2xl rounded-tl-sm shadow-sm inline-flex flex-col self-start max-w-full">
+                        <span className="font-bold text-[13px] text-gray-900 leading-tight">{comment.user.username}</span>
+                        <span className="text-[14px] text-gray-800 break-words mt-0.5">{comment.content}</span>
+                    </div>
+                    {isMe && (
+                        <button onClick={() => onDelete(comment)} title="Xóa bình luận" className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-50 text-gray-400 hover:text-red-500 rounded-full transition-all shrink-0">
+                            <X size={14} />
+                        </button>
+                    )}
                 </div>
                 <div className="flex items-center gap-3 mt-1 ml-2 text-[11px] text-gray-500 font-medium">
                     <span>{formatDate(comment.created_at)}</span>
-                    <button className="hover:underline font-bold text-gray-600">Phản hồi</button>
+                    <button onClick={() => onReply(comment)} className="hover:underline font-bold text-gray-600">Phản hồi</button>
                 </div>
                 {comment.children && comment.children.length > 0 && (
                     <div className="flex flex-col mt-1 w-full">
-                        {comment.children.map(child => <CommentNode key={child.id} comment={child} isReply={true} />)}
+                        {comment.children.map(child => <CommentNode key={child.id} comment={child} isReply={true} onReply={onReply} onDelete={onDelete} currentUser={currentUser} />)}
                     </div>
                 )}
             </div>
@@ -112,7 +120,6 @@ export default function PostFeed({ token }: { token: string }) {
                 const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
                 const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-                // Tải danh sách bạn bè để check xem đã kết bạn chưa
                 fetch(`${apiUrl}/friend/list`, { method: 'GET', headers })
                     .then(res => res.ok ? res.json() : null)
                     .then(data => {
@@ -121,7 +128,6 @@ export default function PostFeed({ token }: { token: string }) {
                         }
                     }).catch(e => console.error(e));
 
-                // Tải bài viết
                 const response = await fetch(`${apiUrl}/interact/post`, {
                     method: 'GET',
                     headers
@@ -185,6 +191,14 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
     const [isDetailOpen, setIsDetailOpen] = useState(false);
     const [postDetail, setPostDetail] = useState<PostDetailData | null>(null);
     const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+    const [localIsLiked, setLocalIsLiked] = useState(post.is_liked);
+    const [localLikeCount, setLocalLikeCount] = useState(post.like_count);
+    const [localCommentCount, setLocalCommentCount] = useState(post.comment_count);
+    const [commentText, setCommentText] = useState('');
+    const [replyingTo, setReplyingTo] = useState<CommentData | null>(null);
+    const [isSubmittingComment, setIsSubmittingComment] = useState(false);
+
+    const commentInputRef = useRef<HTMLInputElement>(null);
 
     // Fallback lấy currentUser từ local nếu component dùng lẻ ở file Profile.tsx
     const [localUser, setLocalUser] = useState<any>(propUser);
@@ -196,6 +210,12 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
             setLocalUser(propUser);
         }
     }, [propUser]);
+
+    useEffect(() => {
+        setLocalIsLiked(post.is_liked);
+        setLocalLikeCount(post.like_count);
+        setLocalCommentCount(post.comment_count);
+    }, [post.is_liked, post.like_count, post.comment_count]);
 
     const isMe = localUser && String(localUser.id) === String(post.user.user_id);
     const showAddFriend = !isMe && !isFriend && !isRequested;
@@ -222,6 +242,54 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
         } catch (err) { setIsRequested(false); }
     };
 
+    const handleLikeToggle = async () => {
+        const t = token || localStorage.getItem('token');
+        const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+
+        const isCurrentlyLiked = localIsLiked;
+        const endpoint = isCurrentlyLiked ? '/interact/post/like/delete' : '/interact/post/like';
+
+        // Cập nhật giao diện lập tức (Optimistic update)
+        setLocalIsLiked(!isCurrentlyLiked);
+        setLocalLikeCount(prev => isCurrentlyLiked ? prev - 1 : prev + 1);
+
+        if (postDetail) {
+            setPostDetail(prev => prev ? {
+                ...prev,
+                is_liked: !isCurrentlyLiked,
+                like_count: isCurrentlyLiked ? prev.like_count - 1 : prev.like_count + 1
+            } : prev);
+        }
+
+        try {
+            const res = await fetch(`${apiUrl}${endpoint}`, {
+                method: isCurrentlyLiked ? 'DELETE' : 'POST',
+                headers: { 'Authorization': `Bearer ${t}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ post_id: post.id })
+            });
+
+            if (res.ok) {
+                // Bắn thông báo nếu là Like và người đó không tự Like bài của chính mình
+                if (!isCurrentlyLiked && localUser && String(localUser.id) !== String(post.user.user_id)) {
+                    webSocketService.sendMessage({
+                        type: 'notification',
+                        to: post.user.user_id,
+                        content: `${localUser.username || 'Ai đó'} đã thích bài viết của bạn.`
+                    });
+                }
+            } else { // Khôi phục lại nếu API lỗi
+                const errData = await res.text();
+                console.error("❌ Lỗi gọi API Like/Unlike:", res.status, errData);
+                setLocalIsLiked(isCurrentlyLiked);
+                setLocalLikeCount(prev => isCurrentlyLiked ? prev + 1 : prev - 1);
+            }
+        } catch (err) {
+            console.error("❌ Lỗi Network khi gọi API Like/Unlike:", err);
+            setLocalIsLiked(isCurrentlyLiked);
+            setLocalLikeCount(prev => isCurrentlyLiked ? prev + 1 : prev - 1);
+        }
+    };
+
     const handleOpenDetail = async () => {
         setIsDetailOpen(true);
         if (!postDetail) {
@@ -242,6 +310,77 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
                 setIsLoadingDetail(false);
             }
         }
+    };
+
+    // --- BÌNH LUẬN & PHẢN HỒI ---
+    const handleReplyClick = (comment: CommentData) => {
+        setReplyingTo(comment);
+        setCommentText(`@${comment.user.username} `);
+        commentInputRef.current?.focus();
+    };
+
+    const handleCommentSubmit = async () => {
+        if (!commentText.trim()) return;
+        setIsSubmittingComment(true);
+
+        const t = token || localStorage.getItem('token');
+        const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+        const endpoint = replyingTo ? '/interact/post/comment/reply' : '/interact/post/comment';
+        
+        const payload: any = { post_id: post.id, content: commentText.trim() };
+        if (replyingTo) payload.parent_id = replyingTo.id; // Truyền thêm ID bình luận gốc
+
+        try {
+            const res = await fetch(`${apiUrl}${endpoint}`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${t}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (res.ok) {
+                // Gửi Notification
+                if (!replyingTo && localUser && String(localUser.id) !== String(post.user.user_id)) {
+                    webSocketService.sendMessage({ type: 'notification', to: post.user.user_id, content: `${localUser.username || 'Ai đó'} đã bình luận về bài viết của bạn.` });
+                } else if (replyingTo && localUser && String(localUser.id) !== String(replyingTo.user.user_id)) {
+                    webSocketService.sendMessage({ type: 'notification', to: replyingTo.user.user_id, content: `${localUser.username || 'Ai đó'} đã trả lời bình luận của bạn.` });
+                }
+
+                // Tải lại chi tiết bài viết để hiện bình luận mới ngay lập tức
+                const detailRes = await fetch(`${apiUrl}/interact/post/${post.id}`, { headers: { 'Authorization': `Bearer ${t}` } });
+                if (detailRes.ok) {
+                    const data = await detailRes.json();
+                    setPostDetail(data.post);
+                    setLocalCommentCount(data.post.comment_count);
+                }
+                setCommentText('');
+                setReplyingTo(null);
+            }
+        } catch (err) { console.error('Lỗi khi gửi bình luận', err); }
+        setIsSubmittingComment(false);
+    };
+
+    const handleDeleteComment = async (comment: CommentData) => {
+        if (!window.confirm('Bạn có chắc chắn muốn xóa bình luận này?')) return;
+
+        const t = token || localStorage.getItem('token');
+        const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+
+        try {
+            const res = await fetch(`${apiUrl}/interact/post/comment/delete`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${t}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ comment_id: comment.id })
+            });
+
+            if (res.ok) {
+                const detailRes = await fetch(`${apiUrl}/interact/post/${post.id}`, { headers: { 'Authorization': `Bearer ${t}` } });
+                if (detailRes.ok) {
+                    const data = await detailRes.json();
+                    setPostDetail(data.post);
+                    setLocalCommentCount(data.post.comment_count);
+                }
+            }
+        } catch (err) { console.error('Lỗi khi xóa bình luận', err); }
     };
 
     return (
@@ -321,17 +460,17 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
                 <div className="flex justify-between items-center text-[13px] text-gray-500 mb-3 px-1">
                     <div className="flex items-center gap-1.5 cursor-pointer hover:underline">
                         <div className="bg-pink-500 rounded-full p-1"><ThumbsUp size={10} className="text-white" fill="currentColor" /></div>
-                        <span>{post.like_count} lượt thích</span>
+                        <span>{localLikeCount} lượt thích</span>
                     </div>
                     <div onClick={handleOpenDetail} className="cursor-pointer hover:underline">
-                        {post.comment_count} bình luận
+                        {localCommentCount} bình luận
                     </div>
                 </div>
 
                 {/* Phần dưới: 2 nút Tương tác */}
                 <div className="flex justify-between border-t border-gray-100 pt-1.5">
-                    <button className={`flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-[14px] font-semibold transition-colors ${post.is_liked ? 'text-pink-600' : 'text-gray-600'}`}>
-                        <ThumbsUp size={20} className={post.is_liked ? 'fill-current' : ''} /> Thích
+                    <button onClick={handleLikeToggle} className={`flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-[14px] font-semibold transition-colors ${localIsLiked ? 'text-pink-600' : 'text-gray-600'}`}>
+                        <ThumbsUp size={20} className={localIsLiked ? 'fill-current' : ''} /> Thích
                     </button>
                     <button onClick={handleOpenDetail} className="flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-gray-600 text-[14px] font-semibold transition-colors">
                         <MessageSquare size={20} /> Bình luận
@@ -382,15 +521,51 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
 
                                     {/* Stats */}
                                     <div className="px-4 py-3 border-b border-gray-100 flex justify-between text-[13px] text-gray-500 font-medium">
-                                        <div className="flex items-center gap-1.5"><div className="bg-pink-500 rounded-full p-1"><ThumbsUp size={10} className="text-white" fill="currentColor" /></div> {postDetail.like_count} lượt thích</div>
-                                        <div>{postDetail.comment_count} bình luận</div>
+                                        <div className="flex items-center gap-1.5"><div className="bg-pink-500 rounded-full p-1"><ThumbsUp size={10} className="text-white" fill="currentColor" /></div> {localLikeCount} lượt thích</div>
+                                        <div>{localCommentCount} bình luận</div>
+                                    </div>
+
+                                    {/* Action Buttons */}
+                                    <div className="flex justify-between border-b border-gray-100 px-4 py-1 bg-white">
+                                        <button onClick={handleLikeToggle} className={`flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-[14px] font-semibold transition-colors ${localIsLiked ? 'text-pink-600' : 'text-gray-600'}`}>
+                                            <ThumbsUp size={20} className={localIsLiked ? 'fill-current' : ''} /> Thích
+                                        </button>
+                                        <button className="flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-gray-600 text-[14px] font-semibold transition-colors">
+                                            <MessageSquare size={20} /> Bình luận
+                                        </button>
+                                    </div>
+
+                                    {/* Comment Input */}
+                                    {replyingTo && (
+                                        <div className="px-4 pt-2 pb-1 bg-gray-50 flex items-center justify-between text-[12px] text-gray-500 border-b border-gray-100">
+                                            <span>Đang trả lời <strong>{replyingTo.user.username}</strong></span>
+                                            <button onClick={() => { setReplyingTo(null); setCommentText(''); }} className="hover:underline font-medium text-pink-500">Hủy</button>
+                                        </div>
+                                    )}
+                                    <div className="px-4 py-3 flex items-center gap-3 bg-white border-b border-gray-100">
+                                        <img src={getImageUrl(localUser?.avatar_url)} className="w-8 h-8 rounded-full object-cover ring-1 ring-gray-100" alt="avatar" />
+                                        <div className="flex-1 relative flex items-center">
+                                            <input
+                                                ref={commentInputRef}
+                                                type="text"
+                                                placeholder="Viết bình luận..."
+                                                value={commentText}
+                                                onChange={(e) => setCommentText(e.target.value)}
+                                                onKeyDown={(e) => e.key === 'Enter' && handleCommentSubmit()}
+                                                disabled={isSubmittingComment}
+                                                className="w-full bg-gray-100 rounded-full pl-4 pr-10 py-2 text-[14px] outline-none focus:ring-1 focus:ring-pink-300 transition-shadow"
+                                            />
+                                            <button onClick={handleCommentSubmit} disabled={!commentText.trim() || isSubmittingComment} className="absolute right-1 text-pink-500 hover:bg-pink-50 p-1.5 rounded-full transition-colors disabled:opacity-50 disabled:hover:bg-transparent">
+                                                {isSubmittingComment ? <div className="w-4 h-4 border-2 border-pink-500 border-t-transparent rounded-full animate-spin mx-0.5"></div> : <Send size={18} className={commentText.trim() ? "fill-current" : ""} />}
+                                            </button>
+                                        </div>
                                     </div>
 
                                     {/* Comments Section */}
                                     <div className="p-4 flex flex-col gap-2 bg-gray-50 flex-1">
                                         <h3 className="font-bold text-gray-800 text-[15px] mb-2">Bình luận</h3>
                                         {postDetail.comments && postDetail.comments.length > 0 ? (
-                                            buildCommentTree(postDetail.comments).map(c => <CommentNode key={c.id} comment={c} />)
+                                            buildCommentTree(postDetail.comments).map(c => <CommentNode key={c.id} comment={c} onReply={handleReplyClick} onDelete={handleDeleteComment} currentUser={localUser} />)
                                         ) : (
                                             <div className="text-center text-sm text-gray-500 py-6">Chưa có bình luận nào. Hãy là người đầu tiên!</div>
                                         )}
