@@ -142,7 +142,10 @@ export default function Messenger() {
                 });
             }
         };
-
+        // Chim mồi để trigger ICE gathering
+        pc.createDataChannel("test");
+        pc.createOffer().then((o) => pc.setLocalDescription(o));
+        
         pc.ontrack = (e) => {
             if (remoteVideoRef.current) {
                 remoteVideoRef.current.srcObject = e.streams[0];
@@ -518,8 +521,8 @@ export default function Messenger() {
             {/* UI khi đang trong cuộc gọi */}
             {inCall && mounted && createPortal(
                 <div className={`fixed z-[200] transition-all duration-300 ease-in-out bg-gray-900 border border-gray-700 shadow-2xl overflow-hidden flex flex-col ${minimized
-                        ? "bottom-4 right-4 w-64 h-48 rounded-2xl cursor-pointer hover:bg-gray-800"
-                        : "inset-0 w-full h-full"
+                    ? "bottom-4 right-4 w-64 h-48 rounded-2xl cursor-pointer hover:bg-gray-800"
+                    : "inset-0 w-full h-full"
                     }`}>
                     {minimized && <div onClick={() => setMinimized(false)} className="absolute inset-0 z-10"></div>}
 
