@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { MoreHorizontal, ThumbsUp, MessageSquare, UserPlus, Check } from 'lucide-react';
+import { MoreHorizontal, ThumbsUp, MessageSquare, UserPlus, Check, X } from 'lucide-react';
 import webSocketService from './websocketService';
 
 export interface Post {
@@ -22,6 +22,23 @@ export interface Post {
     is_liked: boolean;
 }
 
+export interface CommentData {
+    id: string;
+    content: string;
+    created_at: string;
+    parent_id?: string;
+    user: {
+        user_id: string;
+        username: string;
+        avatar_url: string;
+    };
+    children?: CommentData[];
+}
+
+export interface PostDetailData extends Post {
+    comments: CommentData[];
+}
+
 export const getImageUrl = (url?: string) => {
     if (!url) return 'https://i.pravatar.cc/150?u=current';
     if (url.startsWith('http')) return url;
@@ -33,6 +50,50 @@ export const formatDate = (dateString: string) => {
     const date = new Date(dateString);
     return date.toLocaleDateString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' });
 };
+
+// Hàm chuyển đổi mảng phẳng thành cấu trúc cây dựa vào parent_id
+const buildCommentTree = (comments: CommentData[]) => {
+    const commentMap: { [key: string]: CommentData } = {};
+    const roots: CommentData[] = [];
+
+    comments.forEach(c => {
+        commentMap[c.id] = { ...c, children: [] };
+    });
+
+    comments.forEach(c => {
+        if (c.parent_id && commentMap[c.parent_id]) {
+            commentMap[c.parent_id].children!.push(commentMap[c.id]);
+        } else {
+            roots.push(commentMap[c.id]);
+        }
+    });
+
+    return roots;
+};
+
+// Component đệ quy hiển thị từng bình luận và các bình luận con
+function CommentNode({ comment, isReply = false }: { comment: CommentData, isReply?: boolean }) {
+    return (
+        <div className="flex gap-2.5 items-start mt-3 first:mt-0 w-full">
+            <img src={getImageUrl(comment.user.avatar_url)} className={`${isReply ? 'w-6 h-6' : 'w-8 h-8'} rounded-full object-cover shrink-0 ring-1 ring-gray-200`} alt="avatar" />
+            <div className="flex flex-col flex-1 min-w-0">
+                <div className="bg-white border border-gray-100 px-3 py-2 rounded-2xl rounded-tl-sm shadow-sm inline-flex flex-col self-start max-w-full">
+                    <span className="font-bold text-[13px] text-gray-900 leading-tight">{comment.user.username}</span>
+                    <span className="text-[14px] text-gray-800 break-words mt-0.5">{comment.content}</span>
+                </div>
+                <div className="flex items-center gap-3 mt-1 ml-2 text-[11px] text-gray-500 font-medium">
+                    <span>{formatDate(comment.created_at)}</span>
+                    <button className="hover:underline font-bold text-gray-600">Phản hồi</button>
+                </div>
+                {comment.children && comment.children.length > 0 && (
+                    <div className="flex flex-col mt-1 w-full">
+                        {comment.children.map(child => <CommentNode key={child.id} comment={child} isReply={true} />)}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
 
 export default function PostFeed({ token }: { token: string }) {
     const [posts, setPosts] = useState<Post[]>([]);
@@ -121,6 +182,9 @@ export default function PostFeed({ token }: { token: string }) {
 export function PostCard({ post, currentUser: propUser, isFriend, token }: { post: Post, currentUser?: any, isFriend?: boolean, token?: string }) {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [isRequested, setIsRequested] = useState(false);
+    const [isDetailOpen, setIsDetailOpen] = useState(false);
+    const [postDetail, setPostDetail] = useState<PostDetailData | null>(null);
+    const [isLoadingDetail, setIsLoadingDetail] = useState(false);
 
     // Fallback lấy currentUser từ local nếu component dùng lẻ ở file Profile.tsx
     const [localUser, setLocalUser] = useState<any>(propUser);
@@ -146,13 +210,38 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
                 headers: { 'Authorization': `Bearer ${t}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: post.user.user_id })
             });
+
+            const data = await res.json().catch(() => ({}));
+
             if (res.ok) {
-                // Gửi thông báo Notification qua WebSocket
+                console.log("✅ Thành công! Đang bắn WS Notification sang user:", post.user.user_id);
                 webSocketService.sendMessage({ type: 'notification', to: post.user.user_id, content: `${localUser?.username || 'Ai đó'} đã gửi cho bạn một lời mời kết bạn.` });
             } else {
-                setIsRequested(false);
+                console.error("❌ Lỗi API (Bị chặn không gửi WS Notification):", data);
             }
         } catch (err) { setIsRequested(false); }
+    };
+
+    const handleOpenDetail = async () => {
+        setIsDetailOpen(true);
+        if (!postDetail) {
+            setIsLoadingDetail(true);
+            try {
+                const t = token || localStorage.getItem('token');
+                const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+                const res = await fetch(`${apiUrl}/interact/post/${post.id}`, {
+                    headers: { 'Authorization': `Bearer ${t}` }
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    setPostDetail(data.post);
+                }
+            } catch (err) {
+                console.error("Lỗi khi tải chi tiết bài viết", err);
+            } finally {
+                setIsLoadingDetail(false);
+            }
+        }
     };
 
     return (
@@ -234,7 +323,7 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
                         <div className="bg-pink-500 rounded-full p-1"><ThumbsUp size={10} className="text-white" fill="currentColor" /></div>
                         <span>{post.like_count} lượt thích</span>
                     </div>
-                    <div className="cursor-pointer hover:underline">
+                    <div onClick={handleOpenDetail} className="cursor-pointer hover:underline">
                         {post.comment_count} bình luận
                     </div>
                 </div>
@@ -244,11 +333,76 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
                     <button className={`flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-[14px] font-semibold transition-colors ${post.is_liked ? 'text-pink-600' : 'text-gray-600'}`}>
                         <ThumbsUp size={20} className={post.is_liked ? 'fill-current' : ''} /> Thích
                     </button>
-                    <button className="flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-gray-600 text-[14px] font-semibold transition-colors">
+                    <button onClick={handleOpenDetail} className="flex-1 flex items-center justify-center gap-2 py-2 hover:bg-gray-50 rounded-lg text-gray-600 text-[14px] font-semibold transition-colors">
                         <MessageSquare size={20} /> Bình luận
                     </button>
                 </div>
             </div>
+
+            {/* MODAL CHI TIẾT BÀI VIẾT & BÌNH LUẬN */}
+            {isDetailOpen && (
+                <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-200">
+                    <div className="bg-white w-full max-w-2xl h-[90vh] sm:h-auto sm:max-h-[90vh] rounded-2xl flex flex-col overflow-hidden shadow-2xl relative animate-in zoom-in-95 duration-200">
+                        {/* Header Modal */}
+                        <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between bg-white shrink-0">
+                            <h2 className="font-bold text-lg text-gray-800">Bài viết của {post.user.username}</h2>
+                            <button onClick={() => setIsDetailOpen(false)} className="p-2 -mr-2 hover:bg-gray-100 rounded-full transition-colors">
+                                <X size={24} className="text-gray-600" />
+                            </button>
+                        </div>
+
+                        {/* Content Modal */}
+                        <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col">
+                            {isLoadingDetail ? (
+                                <div className="flex justify-center p-8"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-pink-500"></div></div>
+                            ) : postDetail ? (
+                                <>
+                                    {/* User Info */}
+                                    <div className="p-4 flex items-center gap-3">
+                                        <img src={getImageUrl(postDetail.user.avatar_url)} className="w-10 h-10 rounded-full object-cover ring-1 ring-gray-100" alt="avatar" />
+                                        <div>
+                                            <div className="font-semibold text-[15px]">{postDetail.user.username}</div>
+                                            <div className="text-[12px] text-gray-500">{formatDate(postDetail.created_at)}</div>
+                                        </div>
+                                    </div>
+
+                                    {/* Text Content */}
+                                    {postDetail.content && <div className="px-4 pb-3 text-[15px] leading-relaxed whitespace-pre-wrap">{postDetail.content}</div>}
+
+                                    {/* Media */}
+                                    {postDetail.media && postDetail.media.length > 0 && (
+                                        <div className="w-full bg-gray-50 flex items-center justify-center border-y border-gray-100">
+                                            {postDetail.media[0].type === 'video' ? (
+                                                <video src={getImageUrl(postDetail.media[0].url)} controls className="w-full max-h-[400px] object-contain bg-black" />
+                                            ) : (
+                                                <img src={getImageUrl(postDetail.media[0].url)} className="w-full max-h-[400px] object-contain" alt="media" />
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* Stats */}
+                                    <div className="px-4 py-3 border-b border-gray-100 flex justify-between text-[13px] text-gray-500 font-medium">
+                                        <div className="flex items-center gap-1.5"><div className="bg-pink-500 rounded-full p-1"><ThumbsUp size={10} className="text-white" fill="currentColor" /></div> {postDetail.like_count} lượt thích</div>
+                                        <div>{postDetail.comment_count} bình luận</div>
+                                    </div>
+
+                                    {/* Comments Section */}
+                                    <div className="p-4 flex flex-col gap-2 bg-gray-50 flex-1">
+                                        <h3 className="font-bold text-gray-800 text-[15px] mb-2">Bình luận</h3>
+                                        {postDetail.comments && postDetail.comments.length > 0 ? (
+                                            buildCommentTree(postDetail.comments).map(c => <CommentNode key={c.id} comment={c} />)
+                                        ) : (
+                                            <div className="text-center text-sm text-gray-500 py-6">Chưa có bình luận nào. Hãy là người đầu tiên!</div>
+                                        )}
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="p-8 text-center text-gray-500">Không thể tải thông tin bài viết.</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

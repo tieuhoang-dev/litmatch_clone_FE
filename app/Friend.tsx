@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserPlus, Users as UsersIcon, MoreHorizontal } from 'lucide-react';
 import { getImageUrl } from './PostFeed';
+import webSocketService from './websocketService';
 
 interface FriendData {
     UserID: string;
@@ -61,6 +62,56 @@ export default function Friend({ token, handleLogout }: { token: string, handleL
         fetchAllData();
     }, [token, handleLogout]);
 
+    // --- XỬ LÝ CHẤP NHẬN KẾT BẠN ---
+    const handleAccept = async (req: FriendRequest) => {
+        try {
+            const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+            const res = await fetch(`${apiUrl}/friend/accept`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: req.id })
+            });
+
+            if (res.ok) {
+                // 1. Xoá khỏi danh sách lời mời
+                setRequests(prev => prev.filter(r => r.id !== req.id));
+
+                // 2. Thêm ngay người này vào danh sách bạn bè
+                setFriends(prev => [{
+                    UserID: req.requester.user_id,
+                    Username: req.requester.username,
+                    AvatarURL: req.requester.avatar_url
+                }, ...prev]);
+
+                // 3. Gửi thông báo qua WebSocket
+                const userStr = localStorage.getItem('currentUser');
+                const currentUser = userStr ? JSON.parse(userStr) : null;
+                webSocketService.sendMessage({
+                    type: 'notification',
+                    to: req.requester.user_id,
+                    content: `${currentUser?.username || 'Ai đó'} đã chấp nhận lời mời kết bạn của bạn.`
+                });
+            }
+        } catch (error) { console.error('Lỗi khi chấp nhận kết bạn:', error); }
+    };
+
+    // --- XỬ LÝ TỪ CHỐI KẾT BẠN ---
+    const handleReject = async (req: FriendRequest) => {
+        try {
+            const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+            const res = await fetch(`${apiUrl}/friend/reject`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: req.id })
+            });
+
+            if (res.ok) {
+                setRequests(prev => prev.filter(r => r.id !== req.id));
+                // Thông thường không nên gửi thông báo khi bị từ chối để giữ lịch sự
+            }
+        } catch (error) { console.error('Lỗi khi từ chối kết bạn:', error); }
+    };
+
     if (isLoading) {
         return (
             <div className="w-full flex flex-col items-center justify-center p-12">
@@ -101,10 +152,10 @@ export default function Friend({ token, handleLogout }: { token: string, handleL
                                     Vừa gửi lời mời
                                 </span>
                                 <div className="flex w-full gap-2 mt-auto">
-                                    <button className="flex-1 bg-pink-500 hover:bg-pink-600 text-white py-1.5 rounded-lg font-medium transition-colors text-sm">
+                                    <button onClick={() => handleAccept(req)} className="flex-1 bg-pink-500 hover:bg-pink-600 text-white py-1.5 rounded-lg font-medium transition-colors text-sm active:scale-95">
                                         Xác nhận
                                     </button>
-                                    <button className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 py-1.5 rounded-lg font-medium transition-colors text-sm">
+                                    <button onClick={() => handleReject(req)} className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 py-1.5 rounded-lg font-medium transition-colors text-sm active:scale-95">
                                         Xoá
                                     </button>
                                 </div>
