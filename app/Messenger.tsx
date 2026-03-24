@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { MessageCircle, Phone, Video, X, Image as ImageIcon, Send } from 'lucide-react';
+import { MessageCircle, Phone, Video, X, Image as ImageIcon, Send, Mic, MicOff, VideoOff, PhoneOff, Minus } from 'lucide-react';
 import webSocketService from './websocketService';
 import { getImageUrl } from './PostFeed';
 
@@ -22,6 +22,25 @@ export default function Messenger() {
     const [isTyping, setIsTyping] = useState(false);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const lastTypingTime = useRef<number>(0);
+
+    // --- WebRTC Refs & States ---
+    const pcRef = useRef<RTCPeerConnection | null>(null);
+    const localStreamRef = useRef<MediaStream | null>(null);
+    const localVideoRef = useRef<HTMLVideoElement | null>(null);
+    const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+    const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+    const ringtoneRef = useRef<HTMLAudioElement | null>(null);
+    const callPartnerIdRef = useRef<string | null>(null);
+
+    const [inCall, setInCall] = useState(false);
+    const [incomingCall, setIncomingCall] = useState<any | null>(null);
+    const [callType, setCallType] = useState<"voice" | "video" | null>(null);
+    const [callId, setCallId] = useState<string>("");
+    const [callPartnerId, setCallPartnerId] = useState<string | null>(null);
+    const [callerInfo, setCallerInfo] = useState<any | null>(null);
+    const [micEnabled, setMicEnabled] = useState(true);
+    const [camEnabled, setCamEnabled] = useState(true);
+    const [minimized, setMinimized] = useState(false);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -87,6 +106,204 @@ export default function Messenger() {
             }
         };
     }, [activeChat]);
+
+    // --- WebRTC Logic ---
+    const setPartner = (id: string) => {
+        setCallPartnerId(id);
+        callPartnerIdRef.current = id;
+    };
+
+    const createPeerConnection = () => {
+        if (pcRef.current) return pcRef.current;
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                {
+                    urls: [
+                        "turn:turn.cloudflare.com:3478?transport=udp",
+                        "turn:turn.cloudflare.com:3478?transport=tcp",
+                        "turns:turn.cloudflare.com:5349?transport=tcp",
+                        "turn:turn.cloudflare.com:53?transport=udp",
+                        "turn:turn.cloudflare.com:80?transport=tcp",
+                        "turns:turn.cloudflare.com:443?transport=tcp"
+                    ],
+                    username: "g002f5cd1727b69b6567a6dfeccef6951b5b83918397937ecfc0032cd831bdab",
+                    credential: "9973119094e668b4a3f92c15a70e122125c7e8491202daf5fd41b81b61fa8522"
+                }
+            ]
+        });
+
+        pc.onicecandidate = (e) => {
+            if (e.candidate && callPartnerIdRef.current) {
+                webSocketService.sendMessage({
+                    type: "ice-candidate",
+                    to: callPartnerIdRef.current,
+                    candidate: e.candidate as any,
+                });
+            }
+        };
+
+        pc.ontrack = (e) => {
+            if (remoteVideoRef.current) {
+                remoteVideoRef.current.srcObject = e.streams[0];
+            }
+        };
+
+        pcRef.current = pc;
+        return pc;
+    };
+
+    const stopRingtone = () => {
+        if (ringtoneRef.current) {
+            ringtoneRef.current.pause();
+            ringtoneRef.current.currentTime = 0;
+        }
+    };
+
+    const cleanupCall = () => {
+        stopRingtone();
+        setInCall(false);
+        setCallType(null);
+        setIncomingCall(null);
+        setCallerInfo(null);
+        setPartner('');
+        setMicEnabled(true);
+        setCamEnabled(true);
+        setMinimized(false);
+        setCallId("");
+
+        try { pcRef.current?.close(); } catch { }
+        pcRef.current = null;
+
+        try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch { }
+        localStreamRef.current = null;
+
+        if (localVideoRef.current) localVideoRef.current.srcObject = null;
+        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+        pendingCandidatesRef.current = [];
+    };
+
+    const startCall = async (type: "voice" | "video") => {
+        if (!activeChat) return;
+        setCallType(type);
+        setInCall(true);
+        setPartner(activeChat.UserID);
+        setCallerInfo(activeChat);
+
+        const pc = createPeerConnection();
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === "video" });
+            localStreamRef.current = stream;
+            stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+            if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            webSocketService.sendMessage({ type: "offer", to: activeChat.UserID, offer, content: type, call_type: type });
+        } catch (err) {
+            console.error("Lỗi truy cập thiết bị:", err);
+            cleanupCall();
+        }
+    };
+
+    const acceptCall = async () => {
+        if (!incomingCall) return;
+        stopRingtone();
+        setInCall(true);
+        setCallType(incomingCall.content || incomingCall.call_type);
+        setCallId(incomingCall.call_id);
+        setPartner(incomingCall.from);
+
+        const pc = createPeerConnection();
+        try {
+            const isVideo = incomingCall.content === "video" || incomingCall.call_type === "video";
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: isVideo });
+            localStreamRef.current = stream;
+            stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+            if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+
+            await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            webSocketService.sendMessage({ type: "answer", to: incomingCall.from, id: incomingCall.call_id, answer });
+            setIncomingCall(null);
+        } catch (err) {
+            console.error("Lỗi khi accept call:", err);
+            cleanupCall();
+        }
+    };
+
+    const rejectCall = () => {
+        stopRingtone();
+        if (incomingCall) {
+            webSocketService.sendMessage({ type: "call_end", id: incomingCall.call_id, to: incomingCall.from });
+        }
+        setIncomingCall(null);
+        setCallerInfo(null);
+    };
+
+    const endCall = () => {
+        stopRingtone();
+        if (callPartnerIdRef.current) {
+            webSocketService.sendMessage({ type: "call_end", id: callId, to: callPartnerIdRef.current });
+        }
+        cleanupCall();
+    };
+
+    const toggleMic = () => {
+        if (localStreamRef.current) {
+            localStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !micEnabled));
+            setMicEnabled(!micEnabled);
+        }
+    };
+
+    const toggleCam = () => {
+        if (localStreamRef.current) {
+            localStreamRef.current.getVideoTracks().forEach((t) => (t.enabled = !camEnabled));
+            setCamEnabled(!camEnabled);
+        }
+    };
+
+    useEffect(() => {
+        const handleOffer = (msg: any) => {
+            if (pcRef.current || inCall) return;
+            setIncomingCall(msg);
+            if (msg.call_id) setCallId(msg.call_id);
+            const caller = contacts.find(c => c.UserID === msg.from);
+            setCallerInfo(caller || { username: msg.from });
+            if (!ringtoneRef.current) { ringtoneRef.current = new Audio("/Ringstone.mp3"); ringtoneRef.current.loop = true; }
+            ringtoneRef.current.play().catch(() => { });
+        };
+        const handleAnswer = async (msg: any) => {
+            if (msg.call_id) setCallId(msg.call_id);
+            if (pcRef.current) {
+                await pcRef.current.setRemoteDescription(new RTCSessionDescription(msg.answer));
+                for (const c of pendingCandidatesRef.current) await pcRef.current.addIceCandidate(new RTCIceCandidate(c));
+                pendingCandidatesRef.current = [];
+            }
+        };
+        const handleIceCandidate = async (msg: any) => {
+            if (pcRef.current && pcRef.current.remoteDescription) await pcRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            else pendingCandidatesRef.current.push(msg.candidate);
+        };
+        const handleCallEnd = () => cleanupCall();
+        const handleCallCreated = (msg: any) => { if (msg.call_id) setCallId(msg.call_id); };
+
+        webSocketService.on('offer', handleOffer);
+        webSocketService.on('answer', handleAnswer);
+        webSocketService.on('ice-candidate', handleIceCandidate);
+        webSocketService.on('call_end', handleCallEnd);
+        webSocketService.on('call_created', handleCallCreated);
+        return () => {
+            webSocketService.off('offer', handleOffer);
+            webSocketService.off('answer', handleAnswer);
+            webSocketService.off('ice-candidate', handleIceCandidate);
+            webSocketService.off('call_end', handleCallEnd);
+            webSocketService.off('call_created', handleCallCreated);
+        };
+    }, [inCall, contacts]);
 
     // Auto scroll xuống tin nhắn mới
     useEffect(() => {
@@ -209,8 +426,8 @@ export default function Messenger() {
                             <div className="font-bold text-[16px] text-gray-800">{activeChat.username}</div>
                         </div>
                         <div className="flex items-center text-pink-500">
-                            <button className="p-2 hover:bg-pink-50 rounded-full transition-colors"><Phone size={20} fill="currentColor" /></button>
-                            <button className="p-2 hover:bg-pink-50 rounded-full transition-colors"><Video size={20} fill="currentColor" /></button>
+                            <button onClick={() => startCall('voice')} className="p-2 hover:bg-pink-50 rounded-full transition-colors"><Phone size={20} fill="currentColor" /></button>
+                            <button onClick={() => startCall('video')} className="p-2 hover:bg-pink-50 rounded-full transition-colors"><Video size={20} fill="currentColor" /></button>
                             <button onClick={() => setActiveChat(null)} className="p-2 hover:bg-gray-100 text-gray-400 rounded-full transition-colors ml-1"><X size={22} /></button>
                         </div>
                     </div>
@@ -274,6 +491,71 @@ export default function Messenger() {
                             {isSending ? <div className="w-6 h-6 border-2 border-pink-500 border-t-transparent rounded-full animate-spin"></div> : <Send size={24} className={inputText.trim() || previewUrl ? 'fill-current' : ''} />}
                         </button>
                     </div>
+                </div>,
+                document.body
+            )}
+
+            {/* Hộp thoại có người gọi tới */}
+            {incomingCall && !inCall && mounted && createPortal(
+                <div className="fixed top-10 right-4 sm:right-10 bg-white border border-gray-200 rounded-2xl shadow-2xl p-5 w-80 z-[200] animate-in slide-in-from-top-4 duration-300">
+                    <div className="flex flex-col items-center">
+                        <img src={getImageUrl(callerInfo?.avatar)} alt="avatar" className="w-20 h-20 rounded-full mb-3 shadow-md ring-4 ring-pink-50 object-cover" />
+                        <h3 className="text-lg font-bold text-gray-900">{callerInfo?.username || incomingCall.from}</h3>
+                        <p className="text-sm text-gray-500 mb-5">Đang gọi {incomingCall.content === 'video' || incomingCall.call_type === 'video' ? 'video' : 'thoại'} cho bạn...</p>
+                        <div className="flex gap-4 w-full">
+                            <button onClick={rejectCall} className="flex-1 bg-red-50 hover:bg-red-100 text-red-600 font-semibold rounded-xl py-2.5 transition-colors flex items-center justify-center gap-2">
+                                <PhoneOff size={20} /> Từ chối
+                            </button>
+                            <button onClick={acceptCall} className="flex-1 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-xl py-2.5 transition-colors flex items-center justify-center gap-2">
+                                <Phone size={20} className="animate-bounce" /> Trả lời
+                            </button>
+                        </div>
+                    </div>
+                </div>,
+                document.body
+            )}
+
+            {/* UI khi đang trong cuộc gọi */}
+            {inCall && mounted && createPortal(
+                <div className={`fixed z-[200] transition-all duration-300 ease-in-out bg-gray-900 border border-gray-700 shadow-2xl overflow-hidden flex flex-col ${minimized
+                        ? "bottom-4 right-4 w-64 h-48 rounded-2xl cursor-pointer hover:bg-gray-800"
+                        : "inset-0 w-full h-full"
+                    }`}>
+                    {minimized && <div onClick={() => setMinimized(false)} className="absolute inset-0 z-10"></div>}
+
+                    <video ref={remoteVideoRef} autoPlay playsInline className={`${callType === "video" ? "w-full h-full object-cover" : "hidden"}`} />
+
+                    {callType === "video" && (
+                        <video ref={localVideoRef} autoPlay playsInline muted className={`absolute border-2 border-gray-600 rounded-xl transition-all duration-300 object-cover shadow-lg bg-gray-800 ${minimized ? "bottom-2 right-2 w-16 h-24" : "bottom-24 right-6 w-32 h-48 sm:w-48 sm:h-64"
+                            }`} />
+                    )}
+
+                    {callType !== "video" && (
+                        <div className="flex flex-col items-center justify-center text-white h-full pointer-events-none">
+                            <img src={getImageUrl(callerInfo?.avatar)} alt="avatar" className={`w-32 h-32 rounded-full mb-6 object-cover shadow-xl ring-4 ring-pink-500/30 ${!minimized && 'animate-pulse'}`} />
+                            <h2 className="text-2xl font-bold">{callerInfo?.username || "Đang gọi..."}</h2>
+                            <p className="text-gray-400 mt-2">Cuộc gọi thoại WebRTC</p>
+                        </div>
+                    )}
+
+                    {!minimized && (
+                        <div className="absolute bottom-8 left-0 right-0 flex justify-center items-center gap-6 z-20">
+                            <button onClick={toggleMic} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${micEnabled ? "bg-gray-700/80 hover:bg-gray-600 backdrop-blur-sm" : "bg-red-500 hover:bg-red-600"} text-white shadow-lg`}>
+                                {micEnabled ? <Mic size={24} /> : <MicOff size={24} />}
+                            </button>
+                            <button onClick={endCall} className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center text-white shadow-lg transition-transform hover:scale-105">
+                                <PhoneOff size={28} />
+                            </button>
+                            {callType === "video" && (
+                                <button onClick={toggleCam} className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${camEnabled ? "bg-gray-700/80 hover:bg-gray-600 backdrop-blur-sm" : "bg-red-500 hover:bg-red-600"} text-white shadow-lg`}>
+                                    {camEnabled ? <Video size={24} /> : <VideoOff size={24} />}
+                                </button>
+                            )}
+                            <button onClick={() => setMinimized(true)} className="w-14 h-14 rounded-full bg-gray-700/80 hover:bg-gray-600 backdrop-blur-sm text-white flex items-center justify-center shadow-lg transition-all">
+                                <Minus size={24} />
+                            </button>
+                        </div>
+                    )}
                 </div>,
                 document.body
             )}

@@ -51,7 +51,6 @@ export const formatDate = (dateString: string) => {
     return date.toLocaleDateString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' });
 };
 
-// Hàm chuyển đổi mảng phẳng thành cấu trúc cây dựa vào parent_id
 const buildCommentTree = (comments: CommentData[]) => {
     const commentMap: { [key: string]: CommentData } = {};
     const roots: CommentData[] = [];
@@ -200,7 +199,6 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
 
     const commentInputRef = useRef<HTMLInputElement>(null);
 
-    // Fallback lấy currentUser từ local nếu component dùng lẻ ở file Profile.tsx
     const [localUser, setLocalUser] = useState<any>(propUser);
     useEffect(() => {
         if (!propUser) {
@@ -249,7 +247,6 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
         const isCurrentlyLiked = localIsLiked;
         const endpoint = isCurrentlyLiked ? '/interact/post/like/delete' : '/interact/post/like';
 
-        // Cập nhật giao diện lập tức (Optimistic update)
         setLocalIsLiked(!isCurrentlyLiked);
         setLocalLikeCount(prev => isCurrentlyLiked ? prev - 1 : prev + 1);
 
@@ -269,7 +266,6 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
             });
 
             if (res.ok) {
-                // Bắn thông báo nếu là Like và người đó không tự Like bài của chính mình
                 if (!isCurrentlyLiked && localUser && String(localUser.id) !== String(post.user.user_id)) {
                     webSocketService.sendMessage({
                         type: 'notification',
@@ -277,7 +273,7 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
                         content: `${localUser.username || 'Ai đó'} đã thích bài viết của bạn.`
                     });
                 }
-            } else { // Khôi phục lại nếu API lỗi
+            } else { 
                 const errData = await res.text();
                 console.error("❌ Lỗi gọi API Like/Unlike:", res.status, errData);
                 setLocalIsLiked(isCurrentlyLiked);
@@ -312,7 +308,6 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
         }
     };
 
-    // --- BÌNH LUẬN & PHẢN HỒI ---
     const handleReplyClick = (comment: CommentData) => {
         setReplyingTo(comment);
         setCommentText(`@${comment.user.username} `);
@@ -328,7 +323,7 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
         const endpoint = replyingTo ? '/interact/post/comment/reply' : '/interact/post/comment';
         
         const payload: any = { post_id: post.id, content: commentText.trim() };
-        if (replyingTo) payload.parent_id = replyingTo.id; // Truyền thêm ID bình luận gốc
+        if (replyingTo) payload.parent_id = replyingTo.id; 
 
         try {
             const res = await fetch(`${apiUrl}${endpoint}`, {
@@ -338,14 +333,12 @@ export function PostCard({ post, currentUser: propUser, isFriend, token }: { pos
             });
 
             if (res.ok) {
-                // Gửi Notification
                 if (!replyingTo && localUser && String(localUser.id) !== String(post.user.user_id)) {
                     webSocketService.sendMessage({ type: 'notification', to: post.user.user_id, content: `${localUser.username || 'Ai đó'} đã bình luận về bài viết của bạn.` });
                 } else if (replyingTo && localUser && String(localUser.id) !== String(replyingTo.user.user_id)) {
                     webSocketService.sendMessage({ type: 'notification', to: replyingTo.user.user_id, content: `${localUser.username || 'Ai đó'} đã trả lời bình luận của bạn.` });
                 }
 
-                // Tải lại chi tiết bài viết để hiện bình luận mới ngay lập tức
                 const detailRes = await fetch(`${apiUrl}/interact/post/${post.id}`, { headers: { 'Authorization': `Bearer ${t}` } });
                 if (detailRes.ok) {
                     const data = await detailRes.json();
