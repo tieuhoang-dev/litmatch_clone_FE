@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Mail, Lock, Loader2, HeartHandshake } from 'lucide-react';
+import webSocketService from '../websocketService';
 
 // --- TYPESCRIPT INTERFACES ---
 interface LoginResponse {
@@ -59,6 +60,9 @@ export default function LoginPage() {
       if (response.ok && (data.status === 'success' || data.token)) {
         localStorage.setItem('token', data.token);
         localStorage.setItem('currentUser', JSON.stringify(data.user));
+
+        // Kết nối WebSocket ngay lập tức với token mới
+        webSocketService.connect(data.token);
 
         router.push('/');
       } else {

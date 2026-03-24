@@ -8,15 +8,15 @@ import {
   Users,
   MessageCircle,
   User as UserIcon,
-  LogOut,
-  Image as ImageIcon,
-  X
+  LogOut
 } from 'lucide-react';
 import PostFeed, { getImageUrl } from './PostFeed';
 import Profile from './Profile';
 import Friend from './Friend';
 import Messenger from './Messenger';
 import webSocketService from './websocketService';
+import CreatePostModal from './CreatePostModal';
+import Notification from './Notification';
 
 export default function Home() {
   const router = useRouter();
@@ -25,6 +25,7 @@ export default function Home() {
   const [currentUser, setCurrentUser] = useState<{ id: string | number, username: string, avatar_url?: string } | null>(null);
   const [isCreatePostOpen, setIsCreatePostOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [refreshFeedKey, setRefreshFeedKey] = useState(0);
 
   useEffect(() => {
     const t = localStorage.getItem('token');
@@ -104,10 +105,7 @@ export default function Home() {
           <div className="flex items-center gap-3">
             {/* Component Messenger nằm góc trên cùng */}
             {token && <Messenger />}
-            <button className="p-2 hover:bg-gray-100 rounded-full relative transition-colors text-gray-700">
-              <Bell size={22} />
-              <span className="absolute top-1.5 right-2 w-2 h-2 bg-red-500 rounded-full border border-white"></span>
-            </button>
+            {token && <Notification />}
           </div>
         </div>
       </header>
@@ -134,7 +132,7 @@ export default function Home() {
               </div>
             </div>
             {/* Feed */}
-            {token && <PostFeed token={token} />}
+            {token && <PostFeed key={refreshFeedKey} token={token} />}
           </div>
         )}
 
@@ -164,44 +162,14 @@ export default function Home() {
       </nav>
 
       {/* --- MODAL ĐĂNG BÀI CHUNG TẠI HOME --- */}
-      {isCreatePostOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center animate-in fade-in duration-200">
-          <div className="bg-white w-full h-full sm:h-auto sm:max-h-[90vh] sm:max-w-lg flex flex-col animate-in slide-in-from-bottom-full duration-300 sm:rounded-2xl sm:shadow-2xl">
-            <div className="flex items-center justify-between p-4 border-b border-gray-100 bg-white sm:rounded-t-2xl">
-              <button onClick={() => setIsCreatePostOpen(false)} className="p-2 -ml-2 hover:bg-gray-100 rounded-full transition-colors">
-                <X size={26} className="text-gray-600" />
-              </button>
-              <h2 className="font-bold text-lg text-gray-800">Tạo bài viết</h2>
-              <button className="font-bold text-white bg-pink-500 hover:bg-pink-600 px-6 py-2 rounded-full transition-colors active:scale-95 text-[15px] shadow-sm shadow-pink-200">
-                Đăng
-              </button>
-            </div>
-            <div className="p-4 flex items-center gap-3 bg-white">
-              <img src={getImageUrl(currentUser?.avatar_url)} className="w-12 h-12 rounded-full object-cover shadow-sm ring-1 ring-gray-100" alt="User" />
-              <div>
-                <div className="font-bold text-[16px] text-gray-900">{currentUser?.username || "Bạn"}</div>
-                <div className="text-[12px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded-md font-medium inline-block mt-0.5">🌍 Công khai</div>
-              </div>
-            </div>
-            <div className="px-4 flex-1 bg-white min-h-[200px]">
-              <textarea
-                autoFocus
-                placeholder={`${currentUser?.username || "Bạn"} ơi, bạn đang nghĩ gì?`}
-                className="w-full h-full text-[17px] outline-none resize-none placeholder:text-gray-400 text-gray-800 leading-relaxed"
-              />
-            </div>
-            <div className="p-4 border-t border-gray-100 bg-white sm:rounded-b-2xl">
-              <div className="flex items-center justify-between p-3.5 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-50 transition-colors">
-                <span className="font-medium text-gray-700">Thêm vào bài viết của bạn</span>
-                <div className="flex gap-2">
-                  <button className="text-green-500 p-1.5 hover:bg-green-50 rounded-full transition-colors">
-                    <ImageIcon size={24} />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+      {token && (
+        <CreatePostModal
+          isOpen={isCreatePostOpen}
+          onClose={() => setIsCreatePostOpen(false)}
+          currentUser={currentUser}
+          token={token}
+          onPostCreated={() => setRefreshFeedKey(prev => prev + 1)} // Gọi để refresh Feed
+        />
       )}
     </div>
   );

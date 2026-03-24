@@ -11,29 +11,35 @@ export default function Messenger() {
     const [contacts, setContacts] = useState<any[]>([]);
     const [activeChat, setActiveChat] = useState<any | null>(null);
     const [messages, setMessages] = useState<any[]>([]);
+    const [currentUser, setCurrentUser] = useState<any>(null);
     const [mounted, setMounted] = useState(false);
 
-    // Form gửi tin nhắn
     const [inputText, setInputText] = useState('');
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [isSending, setIsSending] = useState(false);
+
+    const [isTyping, setIsTyping] = useState(false);
+    const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const lastTypingTime = useRef<number>(0);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
-    // Đảm bảo Portal chỉ render trên Client để tránh lỗi Hydration của Next.js
     useEffect(() => {
         setMounted(true);
+        const userStr = localStorage.getItem('currentUser');
+        if (userStr) {
+            try { setCurrentUser(JSON.parse(userStr)); } catch (e) { }
+        }
     }, []);
 
-    // Lấy contacts mỗi khi mở Dropdown
     useEffect(() => {
         if (isContactsOpen) {
             webSocketService.sendMessage({ type: 'load_contacts' });
         }
     }, [isContactsOpen]);
 
-    // Lắng nghe sự kiện socket
     useEffect(() => {
         const handleContacts = (data: any) => {
             if (data.contacts) setContacts(data.contacts);
@@ -46,10 +52,18 @@ export default function Messenger() {
         };
 
         const handleIncoming = (data: any) => {
+            if (data.type === 'typing') {
+                if (activeChat && data.from === activeChat.UserID) {
+                    setIsTyping(true);
+                    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+                    typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 3000);
+                }
+                return; // Không thêm vào mảng messages
+            }
+
             if (activeChat && (data.from === activeChat.UserID || data.to === activeChat.UserID)) {
                 setMessages(prev => [...prev, data]);
             }
-            // Refresh lại danh sách bạn bè để hiển thị tin nhắn mới nhất
             webSocketService.sendMessage({ type: 'load_contacts' });
         };
 
@@ -57,12 +71,20 @@ export default function Messenger() {
         webSocketService.on('history', handleHistory);
         webSocketService.on('text', handleIncoming);
         webSocketService.on('image', handleIncoming);
+        webSocketService.on('seen', handleIncoming);
+        webSocketService.on('typing', handleIncoming);
+
 
         return () => {
             webSocketService.off('contacts', handleContacts);
             webSocketService.off('history', handleHistory);
             webSocketService.off('text', handleIncoming);
             webSocketService.off('image', handleIncoming);
+            webSocketService.off('seen', handleIncoming);
+            webSocketService.off('typing', handleIncoming);
+            if (typingTimeoutRef.current) {
+                clearTimeout(typingTimeoutRef.current);
+            }
         };
     }, [activeChat]);
 
@@ -87,26 +109,58 @@ export default function Messenger() {
         }
     };
 
-    const handleSend = () => {
+    const handleSend = async () => {
         if (!inputText.trim() && !previewUrl) return;
+        if (isSending) return;
 
-        if (previewUrl && selectedFile) {
-            // Sử dụng FileReader để convert sang base64 phục vụ realtime cho demo.
-            // (Thực tế nên upload API rồi gửi Link vào WS)
-            const reader = new FileReader();
-            reader.onload = () => {
-                webSocketService.sendMessage({ type: 'image', to: activeChat.UserID, content: reader.result as string });
-            };
-            reader.readAsDataURL(selectedFile);
+        setIsSending(true);
+
+        try {
+            if (previewUrl && selectedFile) {
+                const token = localStorage.getItem('token');
+                const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+                const formData = new FormData();
+                formData.append('file', selectedFile);
+                formData.append('type', 'chat');
+
+                const uploadRes = await fetch(`${apiUrl}/interact/upload-media`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                    body: formData
+                });
+
+                if (uploadRes.ok) {
+                    const uploadData = await uploadRes.json();
+                    const imageUrl = uploadData.url || uploadData.avatar_url;
+                    if (imageUrl) {
+                        webSocketService.sendMessage({ type: 'image', to: activeChat.UserID, content: imageUrl });
+                    }
+                } else {
+                    console.error('Lỗi tải ảnh lên.');
+                }
+            }
+
+            if (inputText.trim()) {
+                webSocketService.sendMessage({ type: 'text', to: activeChat.UserID, content: inputText.trim() });
+            }
+
+            setInputText('');
+            setSelectedFile(null);
+            setPreviewUrl(null);
+        } catch (error) {
+            console.error('Lỗi khi gửi tin nhắn:', error);
+        } finally {
+            setIsSending(false);
         }
+    };
 
-        if (inputText.trim()) {
-            webSocketService.sendMessage({ type: 'text', to: activeChat.UserID, content: inputText.trim() });
+    const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setInputText(e.target.value);
+        const now = Date.now();
+        if (activeChat && now - lastTypingTime.current > 2000) {
+            webSocketService.sendMessage({ type: 'typing', to: activeChat.UserID });
+            lastTypingTime.current = now;
         }
-
-        setInputText('');
-        setSelectedFile(null);
-        setPreviewUrl(null);
     };
 
     const totalUnread = contacts.reduce((sum, c) => sum + (c.unread_count || 0), 0);
@@ -166,10 +220,26 @@ export default function Messenger() {
                         {messages.map((msg, idx) => {
                             const isMe = msg.from !== activeChat.UserID;
                             return (
-                                <div key={msg.id || idx} className={`flex flex-col max-w-[80%] ${isMe ? 'self-end items-end' : 'self-start items-start'}`}>
-                                    <div className={`rounded-2xl px-4 py-2.5 shadow-sm ${isMe ? 'bg-pink-500 text-white rounded-br-sm' : 'bg-white border border-gray-100 text-gray-800 rounded-bl-sm'}`}>
+                                <div key={msg.id || idx} className={`flex max-w-[85%] gap-2 ${isMe ? 'self-end flex-row-reverse' : 'self-start'}`}>
+                                    {/* Avatar cho từng tin nhắn */}
+                                    <img src={getImageUrl(isMe ? currentUser?.avatar_url : activeChat.avatar)} className="w-7 h-7 rounded-full object-cover shrink-0 mt-auto shadow-sm border border-gray-100" alt="avatar" />
+
+                                    <div className={msg.type === 'image'
+                                        ? `rounded-2xl shadow-sm overflow-hidden border border-gray-100 ${isMe ? 'rounded-br-sm' : 'rounded-bl-sm'}`
+                                        : `rounded-2xl px-3 py-2 shadow-sm ${isMe ? 'bg-pink-500 text-white rounded-br-sm' : 'bg-white border border-gray-100 text-gray-800 rounded-bl-sm'}`
+                                    }>
                                         {msg.type === 'image' ? (
-                                            <img src={msg.content.startsWith('data:') ? msg.content : getImageUrl(msg.content)} className="rounded-lg max-w-full" alt="img" />
+                                            <img src={msg.content.startsWith('data:') ? msg.content : getImageUrl(msg.content)} className="block max-w-full" alt="img" />
+                                        ) : msg.type === 'call' ? (
+                                            <div className="flex items-center gap-2.5">
+                                                <div className={`p-2 rounded-full ${isMe ? 'bg-pink-600 text-white' : 'bg-gray-100 text-gray-700'}`}>
+                                                    {msg.call_type === 'video' ? <Video size={16} fill="currentColor" /> : <Phone size={16} fill="currentColor" />}
+                                                </div>
+                                                <div className="flex flex-col">
+                                                    <span className="font-semibold text-[14px]">{msg.call_type === 'video' ? 'Cuộc gọi video' : 'Cuộc gọi thoại'}</span>
+                                                    <span className="text-[12px] opacity-90">{msg.duration ? `${Math.floor(msg.duration / 60)} phút ${msg.duration % 60} giây` : 'Bị nhỡ'}</span>
+                                                </div>
+                                            </div>
                                         ) : (
                                             <div className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">{msg.content}</div>
                                         )}
@@ -177,6 +247,16 @@ export default function Messenger() {
                                 </div>
                             );
                         })}
+                        {isTyping && (
+                            <div className="flex self-start max-w-[85%] gap-2">
+                                <img src={getImageUrl(activeChat.avatar)} className="w-7 h-7 rounded-full object-cover shrink-0 mt-auto shadow-sm border border-gray-100" alt="avatar" />
+                                <div className="bg-white border border-gray-100 text-gray-800 rounded-2xl rounded-bl-sm px-4 py-2.5 shadow-sm flex items-center gap-1.5 h-[38px]">
+                                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></span>
+                                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.15s' }}></span>
+                                    <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }}></span>
+                                </div>
+                            </div>
+                        )}
                         <div ref={messagesEndRef} />
                     </div>
 
@@ -189,8 +269,10 @@ export default function Messenger() {
 
                         <input type="file" accept="image/*" className="hidden" ref={fileInputRef} onChange={handleFileSelect} />
                         <button onClick={() => fileInputRef.current?.click()} className="p-2 text-pink-500 hover:bg-pink-50 rounded-full transition-colors shrink-0"><ImageIcon size={24} /></button>
-                        <input type="text" placeholder="Nhắn tin..." value={inputText} onChange={e => setInputText(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSend()} className="flex-1 bg-gray-100 text-gray-800 text-[15px] rounded-full px-4 py-2.5 outline-none focus:ring-1 focus:ring-pink-300" />
-                        <button onClick={handleSend} className={`p-2 rounded-full transition-colors shrink-0 ${inputText.trim() || previewUrl ? 'text-pink-500 hover:bg-pink-50' : 'text-gray-300'}`}><Send size={24} className={inputText.trim() || previewUrl ? 'fill-current' : ''} /></button>
+                        <input type="text" placeholder="Nhắn tin..." value={inputText} onChange={handleTyping} onKeyDown={e => e.key === 'Enter' && handleSend()} className="flex-1 bg-gray-100 text-gray-800 text-[15px] rounded-full px-4 py-2.5 outline-none focus:ring-1 focus:ring-pink-300" />
+                        <button onClick={handleSend} disabled={isSending} className={`p-2 rounded-full transition-colors shrink-0 ${inputText.trim() || previewUrl ? 'text-pink-500 hover:bg-pink-50' : 'text-gray-300'} ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                            {isSending ? <div className="w-6 h-6 border-2 border-pink-500 border-t-transparent rounded-full animate-spin"></div> : <Send size={24} className={inputText.trim() || previewUrl ? 'fill-current' : ''} />}
+                        </button>
                     </div>
                 </div>,
                 document.body

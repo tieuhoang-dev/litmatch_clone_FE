@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { MoreHorizontal, ThumbsUp, MessageSquare } from 'lucide-react';
+import { MoreHorizontal, ThumbsUp, MessageSquare, UserPlus, Check } from 'lucide-react';
+import webSocketService from './websocketService';
 
 export interface Post {
     id: string;
@@ -12,7 +13,7 @@ export interface Post {
         username: string;
         avatar_url: string;
     };
-    media: {
+    media?: {
         url: string;
         type: string;
     }[];
@@ -36,17 +37,33 @@ export const formatDate = (dateString: string) => {
 export default function PostFeed({ token }: { token: string }) {
     const [posts, setPosts] = useState<Post[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [friendsIds, setFriendsIds] = useState<Set<string>>(new Set());
+    const [currentUser, setCurrentUser] = useState<any>(null);
 
     useEffect(() => {
-        const fetchPosts = async () => {
+        const userStr = localStorage.getItem('currentUser');
+        if (userStr) {
+            try { setCurrentUser(JSON.parse(userStr)); } catch (e) { }
+        }
+
+        const fetchPostsAndFriends = async () => {
             try {
                 const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+                const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+                // Tải danh sách bạn bè để check xem đã kết bạn chưa
+                fetch(`${apiUrl}/friend/list`, { method: 'GET', headers })
+                    .then(res => res.ok ? res.json() : null)
+                    .then(data => {
+                        if (data && data.friends) {
+                            setFriendsIds(new Set(data.friends.map((f: any) => f.UserID)));
+                        }
+                    }).catch(e => console.error(e));
+
+                // Tải bài viết
                 const response = await fetch(`${apiUrl}/interact/post`, {
                     method: 'GET',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'application/json'
-                    }
+                    headers
                 });
 
                 if (response.ok) {
@@ -67,7 +84,7 @@ export default function PostFeed({ token }: { token: string }) {
         };
 
         if (token) {
-            fetchPosts();
+            fetchPostsAndFriends();
         }
     }, [token]);
 
@@ -95,14 +112,48 @@ export default function PostFeed({ token }: { token: string }) {
     return (
         <div className="flex flex-col gap-3 pb-4">
             {posts.map(post => (
-                <PostCard key={post.id} post={post} />
+                <PostCard key={post.id} post={post} currentUser={currentUser} isFriend={friendsIds.has(post.user.user_id)} token={token} />
             ))}
         </div>
     );
 }
 
-export function PostCard({ post }: { post: Post }) {
+export function PostCard({ post, currentUser: propUser, isFriend, token }: { post: Post, currentUser?: any, isFriend?: boolean, token?: string }) {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
+    const [isRequested, setIsRequested] = useState(false);
+
+    // Fallback lấy currentUser từ local nếu component dùng lẻ ở file Profile.tsx
+    const [localUser, setLocalUser] = useState<any>(propUser);
+    useEffect(() => {
+        if (!propUser) {
+            const str = localStorage.getItem('currentUser');
+            if (str) try { setLocalUser(JSON.parse(str)); } catch (e) { }
+        } else {
+            setLocalUser(propUser);
+        }
+    }, [propUser]);
+
+    const isMe = localUser && String(localUser.id) === String(post.user.user_id);
+    const showAddFriend = !isMe && !isFriend && !isRequested;
+
+    const handleAddFriend = async () => {
+        setIsRequested(true);
+        try {
+            const t = token || localStorage.getItem('token');
+            const apiUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+            const res = await fetch(`${apiUrl}/friend/request`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${t}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: post.user.user_id })
+            });
+            if (res.ok) {
+                // Gửi thông báo Notification qua WebSocket
+                webSocketService.sendMessage({ type: 'notification', to: post.user.user_id, content: `${localUser?.username || 'Ai đó'} đã gửi cho bạn một lời mời kết bạn.` });
+            } else {
+                setIsRequested(false);
+            }
+        } catch (err) { setIsRequested(false); }
+    };
 
     return (
         <div className="bg-white flex flex-col sm:border-y border-y sm:border-x sm:border-gray-100 sm:rounded-xl shadow-sm overflow-visible border-gray-100">
@@ -111,7 +162,17 @@ export function PostCard({ post }: { post: Post }) {
                 <div className="flex items-center gap-3">
                     <img src={getImageUrl(post.user.avatar_url)} alt={post.user.username} className="w-11 h-11 rounded-full object-cover shadow-sm ring-1 ring-gray-100" />
                     <div>
-                        <div className="font-semibold text-[15px] text-gray-900">{post.user.username}</div>
+                        <div className="flex items-center gap-2">
+                            <div className="font-semibold text-[15px] text-gray-900">{post.user.username}</div>
+                            {showAddFriend && (
+                                <button onClick={handleAddFriend} title="Thêm bạn bè" className="text-pink-500 hover:bg-pink-50 p-1 rounded-full transition-colors active:scale-95">
+                                    <UserPlus size={16} strokeWidth={2.5} />
+                                </button>
+                            )}
+                            {isRequested && (
+                                <div title="Đã gửi lời mời" className="text-gray-400 p-1"><Check size={16} strokeWidth={3} /></div>
+                            )}
+                        </div>
                         <div className="text-[13px] text-gray-500 flex items-center gap-1">
                             {formatDate(post.created_at)} •
                             <span className="text-gray-400">🌐</span>
@@ -148,12 +209,20 @@ export function PostCard({ post }: { post: Post }) {
             {/* Content bài đăng - Media */}
             {post.media && post.media.length > 0 && (
                 <div className="w-full bg-gray-50 flex items-center justify-center border-y border-gray-100">
-                    <img
-                        src={getImageUrl(post.media[0].url)}
-                        alt="Post content"
-                        className="w-full h-auto max-h-[600px] object-contain"
-                        loading="lazy"
-                    />
+                    {post.media[0].type === 'video' ? (
+                        <video
+                            src={getImageUrl(post.media[0].url)}
+                            controls
+                            className="w-full max-h-[600px] object-contain bg-black"
+                        />
+                    ) : (
+                        <img
+                            src={getImageUrl(post.media[0].url)}
+                            alt="Post content"
+                            className="w-full h-auto max-h-[600px] object-contain"
+                            loading="lazy"
+                        />
+                    )}
                 </div>
             )}
 
